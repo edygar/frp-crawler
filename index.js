@@ -1,56 +1,108 @@
-var request = require('request'),
-    cheerio = require('cheerio'),
-    fs = require("fs"),
-    mkdirp = require("mkdirp"),
-    Download = require("download"),
-    progress = require('download-status'),
+"use strict";
+/* jshint node: true */
+
+var Rx = require('rx'),
+    request = require('request'),
+    mkdirp = require('mkdirp'),
+    FileQueue = require('filequeue'),
     path = require('path');
 
-var j = request.jar()
-request = request.defaults({jar:j});
+var fs = new FileQueue(1000), observableRequest, observableMkdirp;
+var downloadStatus = {};
 
-request.post('http://www.devmedia.com.br/login/login.asp', {form:{
-  usuario: "everton.ope@jspecas.com.br",
-  senha: "jsvwjsvw",
-  ac: 1
-}},function(err, response) {
-  process.argv.slice(2).forEach(function(url) {
-    var dir = url.match(/\/curso\/(.*?\/)/)[1];
-    dir = path.join(__dirname,'downloads',dir);	
-    
-    mkdirp(dir, function(err) {
+request = request.defaults({jar:request.jar()});
+observableRequest = Rx.Observable.fromNodeCallback(request);
+observableMkdirp = Rx.Observable.fromNodeCallback(mkdirp);
 
-      console.log("Lendo arquivos de", url);
-      request.get(url, function(err, response, body){
-        var $ = cheerio.load(body), links;
-      	links = $('a[href^="http://www.devmedia.com.br/download/down.asp?id="]')
-        .get();
-	links.forEach(function(url, i) {
-           var $url = $(url);
+// Autentica utilizando as credenciais
+var report = observableRequest({
+  uri: 'http://www.devmedia.com.br/login/login.asp',
+  method: 'post',
+  form:{
+    usuario: "everton.ope@jspecas.com.br",
+    senha: "jsvwjsvw",
+    ac: 1
+  }
+})
 
-	   request.head($url.attr("href"), function(err, response) {
-	     var urlFile = response.request.uri.href;
+// Para cada URL informada
+.combineLatest(Rx.Observable.fromArray(process.argv.slice(2)), function(auth, url) {
+  return url;
+})
 
-             (new Download()
-	     .use(progress()))
-	     .get(urlFile).dest(dir).run(function(err) {
-		console.log("\n\n");
-	     	if (err)
-		   console.log("Erro ao tentar baixar", path.basename(urlFile));
-		else
-		   console.log(path.basename(urlFile), "baixado com sucesso");
+// requisita a página
+.flatMap(function(url) {
+  var dir = url.match(/\/curso\/(.*?\/)/)[1];
+  dir = path.join(__dirname,'downloads',dir); 
 
-		console.log("\n\n");
-	     });
-	   });
-	});
+  return observableMkdirp(dir)
+  .flatMap(function() {
+    return observableRequest(url);
+  })
+  // Encontra todos os links a serem baixados
+  // projeta cada link individualmente na sequência
+  .flatMap(function(response){ 
+    return Rx.Observable.fromArray(response[1].match(/http:\/\/www.devmedia.com.br\/download\/down.asp\?id=([^"']+)/g));
+  })
+  // requisita primeiro a url final do arquivo (depois dos redirecionamentos)
+  .flatMap(function(fileUrl) {
+    return observableRequest({
+      uri: fileUrl,
+      method: 'head'
+    })
+    .flatMap(function(response){
+      var filename = path.join(dir, path.basename(response[0].request.uri.href));
+      return Rx.Observable.create(function(observer) {
+        var filesize = parseInt(response[0].headers['content-length'],10);
+        var report = {
+          filename: filename,
+          total: filesize,
+          downloaded: 0
+        };
 
-	console.log("\n\n");
-	console.log(links.length, "arquivos encontrados");
-	console.log("\n\n");
+        observer.onNext({
+          filename: filename,
+          total: filesize,
+          downloaded: 0
+        });
 
+        request(fileUrl,function(err) {
+          if (err) {
+            console.log("ERROR", err);
+          }
+        })
+        .on('data', function(data) {
+          report.downloaded += data.length;
+          observer.onNext(report);
+        })
+        .on('error', observer.onError.bind(observer))
+        .on('close', observer.onCompleted.bind(observer))
+        .pipe(fs.createWriteStream(filename));
       });
     });
   });
+})
+.subscribe(function(update) {
+  downloadStatus[update.filename] = update;
 });
 
+Rx.Observable.interval(2000).subscribe(function() {
+  var totalPercent = 0,
+      files = Object.keys(downloadStatus);
+
+  files.forEach(function(filename) {
+    var progress = downloadStatus[filename],
+        percent = (100.0 * progress.downloaded / progress.total);
+    totalPercent += percent;
+    console.log(path.basename(filename) + " | Downloaded: " + percent + "% (" + progress.downloaded + " de " + progress.total + ")");
+  });
+
+  totalPercent /= 100 * files.length;
+  console.log('------------');
+  console.log('Total: ' + totalPercent);
+  console.log('------------');
+
+  if (totalPercent >= 100) {
+    process.exit();
+  }
+});
