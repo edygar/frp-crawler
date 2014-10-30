@@ -16,11 +16,11 @@ observableMkdirp = Rx.Observable.fromNodeCallback(mkdirp);
 
 // Autentica utilizando as credenciais
 var report = observableRequest({
-  uri: 'http://www.devmedia.com.br/login/login.asp',
+  uri: 'http://',
   method: 'post',
   form:{
-    usuario: "everton.ope@jspecas.com.br",
-    senha: "jsvwjsvw",
+    usuario: "",
+    senha: "",
     ac: 1
   }
 })
@@ -42,7 +42,7 @@ var report = observableRequest({
   // Encontra todos os links a serem baixados
   // projeta cada link individualmente na sequência
   .flatMap(function(response){ 
-    return Rx.Observable.fromArray(response[1].match(/http:\/\/www.devmedia.com.br\/download\/down.asp\?id=([^"']+)/g));
+    return Rx.Observable.fromArray(response[1].match(/http:\/\/www.xxxxxxxx.com.br\/download\/down.asp\?id=([^"']+)/g));
   })
   // requisita primeiro a url final do arquivo (depois dos redirecionamentos)
   .flatMap(function(fileUrl) {
